@@ -49,7 +49,8 @@ xcrun --sdk "$SDK_NAME" clang -x assembler -c \
 xcrun --sdk "$SDK_NAME" ld \
     -arch arm64 -platform_version "$PLATFORM" "$MIN_IOS" "$SDK_VER" \
     -syslibroot "$SDK" \
-    -lSystem -lobjc -framework UIKit -framework CoreFoundation \
+    -lSystem -lobjc \
+    -framework UIKit -framework Foundation -framework CoreFoundation \
     -e _main -dead_strip -no_data_const -x \
     -o "$APP/$APP_NAME" "$OUT/hello-$MODE.o"
 
@@ -64,8 +65,8 @@ cat > "$APP/Info.plist" <<EOF
 	<key>CFBundleExecutable</key><string>$APP_NAME</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-	<key>CFBundleVersion</key><string>1</string>
-	<key>CFBundleShortVersionString</key><string>1.0</string>
+	<key>CFBundleVersion</key><string>2</string>
+	<key>CFBundleShortVersionString</key><string>1.1</string>
 	<key>CFBundleSupportedPlatforms</key><array><string>$PLIST_PLATFORM</string></array>
 	<key>MinimumOSVersion</key><string>$MIN_IOS</string>
 	<key>UIDeviceFamily</key><array><integer>1</integer></array>
@@ -118,7 +119,7 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 rm -rf "$STAGE/Payload" "$OUT/$APP_NAME.ipa"
 mkdir -p "$STAGE/Payload"
 cp -R "$APP" "$STAGE/Payload/"
-( cd "$STAGE" && zip -qr "$OUT/$APP_NAME.ipa" Payload )
+( cd "$STAGE" && zip -qrX "$OUT/$APP_NAME.ipa" Payload )
 
 echo
 echo "executable : $(stat -f%z "$APP/$APP_NAME") bytes"
