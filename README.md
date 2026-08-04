@@ -9,8 +9,9 @@ Safari on a provisioned device).
 
 ## What it does
 
-Launches and displays "Hello World" centred on screen, above a pull-down menu
-of six colours. Picking one recolours the text.
+Launches and displays "Hello World" centred on screen over a slowly drifting
+gradient cloud, above a pull-down menu of six colours. Picking one recolours
+the text.
 
 ## How it works
 
@@ -34,6 +35,14 @@ structure is written out by hand:
 - **`CGRect` is passed in registers.** It is a four-double homogeneous
   aggregate, so screen bounds travel in `d0`–`d3` and are parked in the
   callee-saved `d8`–`d11` across calls.
+- **The cloud is five radial `CAGradientLayer`s.** Each runs from a system
+  colour at 0.875 alpha in the centre to the same colour at zero alpha at the
+  rim, which is what produces the soft edge — no blur pass and no offscreen
+  render. Five animations per blob (scale x, scale y, opacity, position x,
+  position y, plus a colour cross-fade) all have different periods, so the
+  blobs never re-sync and the shape never repeats. `position` is animated
+  rather than `transform.translation` so it cannot contend with the scale
+  animations for the layer's transform.
 - **The menu's blocks are hand-built.** `UIMenu` is driven by `UIAction`, and
   `UIAction` takes a block — so the six block literals, their shared
   descriptor and their invoke functions are laid out by hand to the block ABI:
@@ -72,24 +81,40 @@ signing anything.
 
 ## Size
 
-Measured like-for-like — same `Info.plist`, same embedded provisioning
-profile, same signing identity, same zip.
+Measured like-for-like: all three implement the *same* app — the label, the
+six-colour pull-down, and the same five-blob `CAGradientLayer` cloud with the
+same animations — and are packaged identically, with the same `Info.plist`,
+embedded provisioning profile, signing identity and zip settings.
 
 | | assembly | Swift + UIKit | SwiftUI |
 |---|---|---|---|
-| `__text` (machine code) | **1,288 B** | 14,996 B | 14,628 B |
-| instructions | **322** | 3,749 | 3,657 |
-| executable, signed | **70,416 B** | 114,688 B | 114,816 B |
-| IPA | **16,508 B** | 31,629 B | 28,361 B |
+| `__text` (machine code) | **2,740 B** | 19,940 B | 21,076 B |
+| instructions | **685** | 4,985 | 5,269 |
+| executable, signed | **70,896 B** | 133,168 B | 125,776 B |
+| IPA | **17,828 B** | 35,450 B | 35,666 B |
 
 The executable and IPA figures are dominated by fixed overhead rather than by
 code: iOS uses 16 KB pages, so the smallest possible executable is already
 several pages, and the embedded provisioning profile alone is 12 KB. The
-`__text` row is the honest comparison, and there the gap is roughly 11.6×.
+`__text` row is the honest comparison, and there the gap is 7.3×.
 
-The whole colour menu — six blocks, the action table, the button, the layout
-arithmetic — cost 528 bytes and 132 instructions on top of the plain
-"Hello World", which was 760 bytes and 190 instructions.
+Cumulative cost of each layer of the assembly build, in machine code:
+
+| | bytes | instructions |
+|---|---|---|
+| plain "Hello World" | 760 | 190 |
+| \+ the colour menu | 1,288 | 322 |
+| \+ the animated cloud | 2,740 | 685 |
+
+The gap narrows as features are added — it was 11.6× for just the label and
+menu, and 7.3× with the cloud — because the cloud is mostly Core Animation
+setup calls, and a message send costs about the same however you write it.
+The ratio reflects how much scaffolding a language puts around those calls,
+and the cloud is unusually light on scaffolding.
+
+It is also worth noting that the cloud then runs for free in all three: Core
+Animation hands the animations to the render server, so nothing in any of
+these binaries executes again after launch.
 
 Note that none of the three embeds a Swift runtime. Swift's ABI has been
 stable since iOS 12.2, so the runtime ships with the OS. Targeting an older

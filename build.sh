@@ -50,7 +50,7 @@ xcrun --sdk "$SDK_NAME" ld \
     -arch arm64 -platform_version "$PLATFORM" "$MIN_IOS" "$SDK_VER" \
     -syslibroot "$SDK" \
     -lSystem -lobjc \
-    -framework UIKit -framework Foundation -framework CoreFoundation \
+    -framework UIKit -framework Foundation -framework CoreFoundation -framework QuartzCore \
     -e _main -dead_strip -no_data_const -x \
     -o "$APP/$APP_NAME" "$OUT/hello-$MODE.o"
 
@@ -65,8 +65,8 @@ cat > "$APP/Info.plist" <<EOF
 	<key>CFBundleExecutable</key><string>$APP_NAME</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-	<key>CFBundleVersion</key><string>2</string>
-	<key>CFBundleShortVersionString</key><string>1.1</string>
+	<key>CFBundleVersion</key><string>3</string>
+	<key>CFBundleShortVersionString</key><string>1.2</string>
 	<key>CFBundleSupportedPlatforms</key><array><string>$PLIST_PLATFORM</string></array>
 	<key>MinimumOSVersion</key><string>$MIN_IOS</string>
 	<key>UIDeviceFamily</key><array><integer>1</integer></array>

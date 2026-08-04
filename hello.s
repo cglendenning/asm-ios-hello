@@ -13,6 +13,10 @@
 // by UIAction, and UIAction takes a *block* - so the block literals, their
 // descriptor and their invoke functions are all laid out by hand too.
 //
+// Behind it all, five radial CAGradientLayers drift, breathe and cross-fade
+// to make a soft glowing cloud. Core Animation runs those on the render
+// server, so the animation costs no CPU once it has been set up.
+//
 // AAPCS64 / Apple ARM64 ABI reminders used throughout:
 //   x0..x7   integer/pointer arguments and return value
 //   d0..d7   floating-point arguments and return value
@@ -30,6 +34,8 @@
 
 	.set	NCOLORS, 6			// entries in the colour menu
 	.set	BLOCK_SIZE, 32			// bytes per global block literal
+	.set	NBLOBS, 5			// gradient blobs making up the cloud
+	.set	NANIMS, 3			// shared per-blob scalar animations
 
 //---------------------------------------------------------------------------
 // Macros: load a class reference / send a message.
@@ -55,6 +61,12 @@
 .macro	LEA reg, sym			// -> reg = &sym
 	adrp	\reg, \sym@PAGE
 	add	\reg, \reg, \sym@PAGEOFF
+.endm
+
+.macro	GOTREF reg, sym			// -> reg = external data symbol sym
+	adrp	x8, \sym@GOTPAGE
+	ldr	x8, [x8, \sym@GOTPAGEOFF]
+	ldr	\reg, [x8]
 .endm
 
 .macro	LOADG reg, sym			// -> reg = global variable sym
@@ -208,6 +220,13 @@ LAppDelegate_didFinishLaunching:
 	mov	x19, x0				// the window is owned for the life of
 	STOREG	x19, LgWindow			// the process, so it is simply retained
 
+	// [window setOverrideUserInterfaceStyle:UIUserInterfaceStyleDark];
+	// The cloud only glows against a dark backdrop, and pinning the style
+	// keeps labelColor white in both system appearances.
+	mov	x0, x19
+	mov	x2, #2
+	MSGSEND	setOverrideUserInterfaceStyle
+
 	// UIViewController *vc = [[UIViewController alloc] init];
 	CLASSREF UIViewController
 	MSGSEND	alloc
@@ -225,6 +244,14 @@ LAppDelegate_didFinishLaunching:
 	mov	x2, x0
 	mov	x0, x21
 	MSGSEND	setBackgroundColor
+
+	// Lay the cloud straight into the root view's layer. Sublayers added
+	// here sit *below* every layer that addSubview: appends later, so the
+	// label and the button stay in front of it without any extra work.
+	mov	x0, x21
+	fmov	d0, d10
+	fmov	d1, d11
+	bl	LbuildCloud
 
 	//-------------------------------------------------------------------
 	// The label
@@ -271,6 +298,28 @@ LAppDelegate_didFinishLaunching:
 	mov	x0, x22
 	mov	x2, #18
 	MSGSEND	setAutoresizingMask
+
+	// A soft drop shadow guarantees the text reads over any blob colour.
+	// [label.layer setShadowColor:[UIColor blackColor].CGColor];
+	CLASSREF UIColor
+	MSGSEND	blackColor
+	MSGSEND	CGColor
+	mov	x24, x0
+	mov	x0, x22
+	MSGSEND	layer
+	mov	x2, x24
+	MSGSEND	setShadowColor
+	// [label.layer setShadowOpacity:0.5];  (float -> s0)
+	mov	x0, x22
+	MSGSEND	layer
+	fmov	s0, #0.5
+	MSGSEND	setShadowOpacity
+	// [label.layer setShadowRadius:12.0];
+	mov	x0, x22
+	MSGSEND	layer
+	mov	w8, #12
+	scvtf	d0, w8
+	MSGSEND	setShadowRadius
 
 	// [root addSubview:label];
 	mov	x0, x21
@@ -330,6 +379,34 @@ Lmenu_loop:
 	LEA	x2, Lcfstr_TextColor
 	mov	x3, #0				// UIControlStateNormal
 	MSGSEND	setTitleForState
+
+	// Give the chooser a translucent pill so it never disappears into a
+	// bright patch of cloud.
+	// [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+	CLASSREF UIColor
+	MSGSEND	whiteColor
+	mov	x2, x0
+	mov	x3, #0
+	mov	x0, x23
+	MSGSEND	setTitleColorForState
+	// [button setBackgroundColor:[[UIColor whiteColor] colorWithAlphaComponent:0.15625]];
+	CLASSREF UIColor
+	MSGSEND	whiteColor
+	fmov	d0, #0.15625
+	MSGSEND	colorWithAlphaComponent
+	mov	x2, x0
+	mov	x0, x23
+	MSGSEND	setBackgroundColor
+	// [button.layer setCornerRadius:25]; [button.layer setMasksToBounds:YES];
+	mov	x0, x23
+	MSGSEND	layer
+	mov	w8, #25
+	scvtf	d0, w8
+	MSGSEND	setCornerRadius
+	mov	x0, x23
+	MSGSEND	layer
+	mov	x2, #1
+	MSGSEND	setMasksToBounds
 
 	// [button setMenu:menu];
 	mov	x0, x23
@@ -444,6 +521,330 @@ LapplyColor:
 
 
 //===========================================================================
+// LbuildCloud - lay five glowing radial blobs into a view's layer.
+//
+//   x0 = UIView *root, d0 = width, d1 = height
+//
+// Each blob is a CAGradientLayer in radial mode whose colours run from a
+// system colour at 0.875 alpha in the centre to the same colour at zero alpha
+// at the rim, which is what gives the soft edge - no blur pass, no offscreen
+// render. Five independent animations per blob, all with different periods so
+// they never re-sync, make it breathe, drift and cross-fade.
+//
+// Stack frame (160 bytes):
+//   [  0] x29, x30       [ 16] x19 root layer, x20 blob entry
+//   [ 32] x21 blob index, x22 gradient layer  [ 48] x23, x24 scratch
+//   [ 64] x25, x26 boxed values               [ 80] x27 anim index, x28 entry
+//   [ 96] d8 width, d9 height                 [112] d10 duration, d11 centre x
+//   [128] d12 centre y, d13                   [144] fromColours, toColours
+//===========================================================================
+	.p2align 2
+LbuildCloud:
+	stp	x29, x30, [sp, #-160]!
+	mov	x29, sp
+	stp	x19, x20, [sp, #16]
+	stp	x21, x22, [sp, #32]
+	stp	x23, x24, [sp, #48]
+	stp	x25, x26, [sp, #64]
+	stp	x27, x28, [sp, #80]
+	stp	d8,  d9,  [sp, #96]
+	stp	d10, d11, [sp, #112]
+	stp	d12, d13, [sp, #128]
+	fmov	d8, d0				// width
+	fmov	d9, d1				// height
+
+	MSGSEND	layer				// x0 is already the root view
+	mov	x19, x0				// root.layer
+
+	mov	x21, #0				// blob index
+Lblob_loop:
+	LEA	x20, Lblobs
+	add	x20, x20, x21, lsl #5		// &Lblobs[i]   (32 bytes per entry)
+
+	// The colour array the blob starts on, and the one it fades toward.
+	mov	x0, x20
+	bl	LmakeColors
+	str	x0, [sp, #144]
+	add	x0, x20, #8
+	bl	LmakeColors
+	str	x0, [sp, #152]
+
+	// CAGradientLayer *g = [CAGradientLayer layer];
+	CLASSREF CAGradientLayer
+	MSGSEND	layer
+	mov	x22, x0
+
+	// [g setType:kCAGradientLayerRadial];
+	GOTREF	x2, _kCAGradientLayerRadial
+	mov	x0, x22
+	MSGSEND	setType
+
+	// [g setColors:fromColours];
+	ldr	x2, [sp, #144]
+	mov	x0, x22
+	MSGSEND	setColors
+
+	// Centre the gradient and let it reach the corner: startPoint (0.5,0.5),
+	// endPoint (1,1). CGPoint is a 2-double HFA, so it travels in d0/d1.
+	mov	x0, x22
+	fmov	d0, #0.5
+	fmov	d1, #0.5
+	MSGSEND	setStartPoint
+	mov	x0, x22
+	fmov	d0, #1.0
+	fmov	d1, #1.0
+	MSGSEND	setEndPoint
+
+	// The table stores position and size as percentages, so the cloud
+	// lays itself out correctly on any screen.
+	//   size = width * size%  / 100
+	//   cx   = width * x%     / 100 ,  cy = height * y% / 100
+	ldrsh	w9,  [x20, #16]			// x%
+	ldrsh	w10, [x20, #18]			// y%
+	ldrsh	w11, [x20, #20]			// size%
+	mov	w12, #100
+	scvtf	d5, w12
+	scvtf	d4, w11
+	fmul	d4, d8, d4
+	fdiv	d4, d4, d5			// size
+	scvtf	d6, w9
+	fmul	d6, d8, d6
+	fdiv	d11, d6, d5			// centre x
+	scvtf	d7, w10
+	fmul	d7, d9, d7
+	fdiv	d12, d7, d5			// centre y
+	fmov	d16, #2.0
+	fdiv	d16, d4, d16
+	fsub	d0, d11, d16			// frame.origin.x
+	fsub	d1, d12, d16			// frame.origin.y
+	fmov	d2, d4				// frame.size.width
+	fmov	d3, d4				// frame.size.height
+	mov	x0, x22
+	MSGSEND	setFrame
+
+	// [root.layer addSublayer:g];
+	mov	x0, x19
+	mov	x2, x22
+	MSGSEND	addSublayer
+
+	ldrsh	w8, [x20, #22]
+	scvtf	d10, w8				// this blob's base period, seconds
+
+	// The three animations whose endpoints are the same for every blob:
+	// scale.x, scale.y and opacity. Only the period differs, which is what
+	// stops the five blobs from pulsing in lockstep.
+	mov	x27, #0
+Lanim_loop:
+	LEA	x28, LanimTable
+	add	x28, x28, x27, lsl #5
+	ldr	d0, [x28, #8]
+	bl	LnumD
+	mov	x25, x0				// fromValue
+	ldr	d0, [x28, #16]
+	bl	LnumD
+	mov	x26, x0				// toValue
+	ldrsh	w8, [x28, #24]
+	scvtf	d0, w8
+	fadd	d0, d0, d10
+	ldr	x1, [x28]
+	mov	x2, x25
+	mov	x3, x26
+	mov	x0, x22
+	bl	LaddAnim
+	add	x27, x27, #1
+	cmp	x27, #NANIMS
+	b.lt	Lanim_loop
+
+	// Drift. position.x / position.y are animated rather than
+	// transform.translation so they never contend with the scale
+	// animations for the layer's transform.
+	mov	w8, #22
+	scvtf	d13, w8
+	fsub	d0, d11, d13
+	bl	LnumD
+	mov	x25, x0
+	fadd	d0, d11, d13
+	bl	LnumD
+	mov	x26, x0
+	mov	w8, #3
+	scvtf	d0, w8
+	fadd	d0, d0, d10
+	LEA	x1, Lcfstr_kpPositionX
+	mov	x2, x25
+	mov	x3, x26
+	mov	x0, x22
+	bl	LaddAnim
+
+	mov	w8, #18
+	scvtf	d13, w8
+	fadd	d0, d12, d13
+	bl	LnumD
+	mov	x25, x0
+	fsub	d0, d12, d13
+	bl	LnumD
+	mov	x26, x0
+	mov	w8, #5
+	scvtf	d0, w8
+	fadd	d0, d0, d10
+	LEA	x1, Lcfstr_kpPositionY
+	mov	x2, x25
+	mov	x3, x26
+	mov	x0, x22
+	bl	LaddAnim
+
+	// The colour cross-fade, at half the rate of everything else.
+	LEA	x1, Lcfstr_kpColors
+	ldr	x2, [sp, #144]
+	ldr	x3, [sp, #152]
+	fmov	d0, #2.0
+	fmul	d0, d10, d0
+	mov	x0, x22
+	bl	LaddAnim
+
+	add	x21, x21, #1
+	cmp	x21, #NBLOBS
+	b.lt	Lblob_loop
+
+	ldp	d12, d13, [sp, #128]
+	ldp	d10, d11, [sp, #112]
+	ldp	d8,  d9,  [sp, #96]
+	ldp	x27, x28, [sp, #80]
+	ldp	x25, x26, [sp, #64]
+	ldp	x23, x24, [sp, #48]
+	ldp	x21, x22, [sp, #32]
+	ldp	x19, x20, [sp, #16]
+	ldp	x29, x30, [sp], #160
+	ret
+
+
+//===========================================================================
+// LmakeColors - two-stop colour array for one blob.
+//
+//   x0 = address of a __objc_selrefs slot naming a UIColor class method
+//   -> x0 = NSArray *{ CGColor at 0.875 alpha, same CGColor at 0 alpha }
+//
+// NSArray happily holds CGColorRefs: they are CF objects, so the retain the
+// array sends them lands on CFRetain.
+//===========================================================================
+	.p2align 2
+LmakeColors:
+	stp	x29, x30, [sp, #-48]!
+	mov	x29, sp
+	stp	x19, x20, [sp, #16]
+
+	ldr	x1, [x0]			// table entry -> selref slot
+	ldr	x1, [x1]			// slot -> the live SEL
+	CLASSREF UIColor
+	bl	_objc_msgSend
+	mov	x19, x0				// the base UIColor
+
+	mov	x0, x19
+	fmov	d0, #0.875
+	MSGSEND	colorWithAlphaComponent
+	MSGSEND	CGColor
+	str	x0, [sp, #32]
+
+	mov	x0, x19
+	fmov	d0, xzr				// fmov cannot encode 0.0 as an
+	MSGSEND	colorWithAlphaComponent		// immediate, so move it from xzr
+	MSGSEND	CGColor
+	str	x0, [sp, #40]
+
+	add	x2, sp, #32
+	mov	x3, #2
+	CLASSREF NSArray
+	MSGSEND	arrayWithObjectsCount
+
+	ldp	x19, x20, [sp, #16]
+	ldp	x29, x30, [sp], #48
+	ret
+
+
+//===========================================================================
+// LnumD - box a double.   d0 -> x0 = NSNumber *
+//===========================================================================
+	.p2align 2
+LnumD:
+	stp	x29, x30, [sp, #-16]!
+	mov	x29, sp
+	CLASSREF NSNumber
+	MSGSEND	numberWithDouble
+	ldp	x29, x30, [sp], #16
+	ret
+
+
+//===========================================================================
+// LaddAnim - attach one infinitely repeating, auto-reversing animation.
+//
+//   x0 = CALayer *, x1 = key path, x2 = fromValue, x3 = toValue, d0 = period
+//
+// The key path doubles as the animation's key, which is unique per layer and
+// keeps a second call on the same property from stacking up.
+//===========================================================================
+	.p2align 2
+LaddAnim:
+	stp	x29, x30, [sp, #-80]!
+	mov	x29, sp
+	stp	x19, x20, [sp, #16]
+	stp	x21, x22, [sp, #32]
+	str	x23, [sp, #48]
+	str	d8,  [sp, #64]
+	mov	x19, x0				// layer
+	mov	x20, x1				// key path
+	mov	x21, x2				// fromValue
+	mov	x22, x3				// toValue
+	fmov	d8, d0				// period
+
+	// CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:keyPath];
+	mov	x2, x20
+	CLASSREF CABasicAnimation
+	MSGSEND	animationWithKeyPath
+	mov	x23, x0
+
+	mov	x0, x23
+	mov	x2, x21
+	MSGSEND	setFromValue
+	mov	x0, x23
+	mov	x2, x22
+	MSGSEND	setToValue
+	mov	x0, x23
+	fmov	d0, d8
+	MSGSEND	setDuration
+	mov	x0, x23
+	mov	x2, #1
+	MSGSEND	setAutoreverses
+
+	// [a setRepeatCount:INFINITY];  repeatCount is a float, so it goes in s0,
+	// and +inf is just the raw bit pattern 0x7f800000.
+	mov	x0, x23
+	movz	w8, #0x7f80, lsl #16
+	fmov	s0, w8
+	MSGSEND	setRepeatCount
+
+	// [a setTimingFunction:[CAMediaTimingFunction
+	//        functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+	GOTREF	x2, _kCAMediaTimingFunctionEaseInEaseOut
+	CLASSREF CAMediaTimingFunction
+	MSGSEND	functionWithName
+	mov	x2, x0
+	mov	x0, x23
+	MSGSEND	setTimingFunction
+
+	// [layer addAnimation:a forKey:keyPath];
+	mov	x0, x19
+	mov	x2, x23
+	mov	x3, x20
+	MSGSEND	addAnimationForKey
+
+	ldr	d8,  [sp, #64]
+	ldr	x23, [sp, #48]
+	ldp	x21, x22, [sp, #32]
+	ldp	x19, x20, [sp, #16]
+	ldp	x29, x30, [sp], #80
+	ret
+
+
+//===========================================================================
 // id -[AppDelegate window]            (x0 = self, x1 = _cmd)
 // void -[AppDelegate setWindow:]      (x0 = self, x1 = _cmd, x2 = UIWindow *)
 //
@@ -480,6 +881,10 @@ Lcls_UIButton:			.quad _OBJC_CLASS_$_UIButton
 Lcls_UIAction:			.quad _OBJC_CLASS_$_UIAction
 Lcls_UIMenu:			.quad _OBJC_CLASS_$_UIMenu
 Lcls_NSArray:			.quad _OBJC_CLASS_$_NSArray
+Lcls_NSNumber:			.quad _OBJC_CLASS_$_NSNumber
+Lcls_CAGradientLayer:		.quad _OBJC_CLASS_$_CAGradientLayer
+Lcls_CABasicAnimation:		.quad _OBJC_CLASS_$_CABasicAnimation
+Lcls_CAMediaTimingFunction:	.quad _OBJC_CLASS_$_CAMediaTimingFunction
 
 // Selector name strings.
 	.section __TEXT,__objc_methname,cstring_literals
@@ -515,6 +920,36 @@ Lmn_menuWithTitleChildren:	.asciz "menuWithTitle:children:"
 Lmn_arrayWithObjectsCount:	.asciz "arrayWithObjects:count:"
 Lmn_actionWithTitleImageIdentifierHandler:
 				.asciz "actionWithTitle:image:identifier:handler:"
+Lmn_systemPinkColor:	.asciz "systemPinkColor"
+Lmn_systemTealColor:	.asciz "systemTealColor"
+Lmn_systemIndigoColor:	.asciz "systemIndigoColor"
+Lmn_whiteColor:	.asciz "whiteColor"
+Lmn_blackColor:	.asciz "blackColor"
+Lmn_CGColor:	.asciz "CGColor"
+Lmn_colorWithAlphaComponent:	.asciz "colorWithAlphaComponent:"
+Lmn_layer:	.asciz "layer"
+Lmn_addSublayer:	.asciz "addSublayer:"
+Lmn_setType:	.asciz "setType:"
+Lmn_setColors:	.asciz "setColors:"
+Lmn_setStartPoint:	.asciz "setStartPoint:"
+Lmn_setEndPoint:	.asciz "setEndPoint:"
+Lmn_numberWithDouble:	.asciz "numberWithDouble:"
+Lmn_animationWithKeyPath:	.asciz "animationWithKeyPath:"
+Lmn_setFromValue:	.asciz "setFromValue:"
+Lmn_setToValue:	.asciz "setToValue:"
+Lmn_setDuration:	.asciz "setDuration:"
+Lmn_setAutoreverses:	.asciz "setAutoreverses:"
+Lmn_setRepeatCount:	.asciz "setRepeatCount:"
+Lmn_setTimingFunction:	.asciz "setTimingFunction:"
+Lmn_functionWithName:	.asciz "functionWithName:"
+Lmn_addAnimationForKey:	.asciz "addAnimation:forKey:"
+Lmn_setOverrideUserInterfaceStyle:	.asciz "setOverrideUserInterfaceStyle:"
+Lmn_setTitleColorForState:	.asciz "setTitleColor:forState:"
+Lmn_setCornerRadius:	.asciz "setCornerRadius:"
+Lmn_setMasksToBounds:	.asciz "setMasksToBounds:"
+Lmn_setShadowColor:	.asciz "setShadowColor:"
+Lmn_setShadowOpacity:	.asciz "setShadowOpacity:"
+Lmn_setShadowRadius:	.asciz "setShadowRadius:"
 
 // Selector references. The runtime rewrites each slot in place, name -> SEL.
 	.section __DATA,__objc_selrefs,literal_pointers,no_dead_strip
@@ -551,6 +986,36 @@ Lsel_menuWithTitleChildren:	.quad Lmn_menuWithTitleChildren
 Lsel_arrayWithObjectsCount:	.quad Lmn_arrayWithObjectsCount
 Lsel_actionWithTitleImageIdentifierHandler:
 				.quad Lmn_actionWithTitleImageIdentifierHandler
+Lsel_systemPinkColor:	.quad Lmn_systemPinkColor
+Lsel_systemTealColor:	.quad Lmn_systemTealColor
+Lsel_systemIndigoColor:	.quad Lmn_systemIndigoColor
+Lsel_whiteColor:	.quad Lmn_whiteColor
+Lsel_blackColor:	.quad Lmn_blackColor
+Lsel_CGColor:	.quad Lmn_CGColor
+Lsel_colorWithAlphaComponent:	.quad Lmn_colorWithAlphaComponent
+Lsel_layer:	.quad Lmn_layer
+Lsel_addSublayer:	.quad Lmn_addSublayer
+Lsel_setType:	.quad Lmn_setType
+Lsel_setColors:	.quad Lmn_setColors
+Lsel_setStartPoint:	.quad Lmn_setStartPoint
+Lsel_setEndPoint:	.quad Lmn_setEndPoint
+Lsel_numberWithDouble:	.quad Lmn_numberWithDouble
+Lsel_animationWithKeyPath:	.quad Lmn_animationWithKeyPath
+Lsel_setFromValue:	.quad Lmn_setFromValue
+Lsel_setToValue:	.quad Lmn_setToValue
+Lsel_setDuration:	.quad Lmn_setDuration
+Lsel_setAutoreverses:	.quad Lmn_setAutoreverses
+Lsel_setRepeatCount:	.quad Lmn_setRepeatCount
+Lsel_setTimingFunction:	.quad Lmn_setTimingFunction
+Lsel_functionWithName:	.quad Lmn_functionWithName
+Lsel_addAnimationForKey:	.quad Lmn_addAnimationForKey
+Lsel_setOverrideUserInterfaceStyle:	.quad Lmn_setOverrideUserInterfaceStyle
+Lsel_setTitleColorForState:	.quad Lmn_setTitleColorForState
+Lsel_setCornerRadius:	.quad Lmn_setCornerRadius
+Lsel_setMasksToBounds:	.quad Lmn_setMasksToBounds
+Lsel_setShadowColor:	.quad Lmn_setShadowColor
+Lsel_setShadowOpacity:	.quad Lmn_setShadowOpacity
+Lsel_setShadowRadius:	.quad Lmn_setShadowRadius
 
 // Plain C strings: runtime-registered selectors, method type encodings, the
 // runtime class name, the block signature, and the UTF-8 backing for the
@@ -584,6 +1049,18 @@ Ltext_Blue:		.asciz "Blue"
 Ltext_Blue_e:
 Ltext_Purple:		.asciz "Purple"
 Ltext_Purple_e:
+Ltext_kpScaleX:	.asciz "transform.scale.x"
+Ltext_kpScaleX_e:
+Ltext_kpScaleY:	.asciz "transform.scale.y"
+Ltext_kpScaleY_e:
+Ltext_kpOpacity:	.asciz "opacity"
+Ltext_kpOpacity_e:
+Ltext_kpPositionX:	.asciz "position.x"
+Ltext_kpPositionX_e:
+Ltext_kpPositionY:	.asciz "position.y"
+Ltext_kpPositionY_e:
+Ltext_kpColors:	.asciz "colors"
+Ltext_kpColors_e:
 
 // Constant NSStrings, laid out by hand in CoreFoundation's documented shape:
 //   { isa, flags, cstring pointer, length }.  0x7c8 marks an 8-bit,
@@ -644,6 +1121,42 @@ Lcfstr_Purple:
 	.space	4
 	.quad	Ltext_Purple
 	.quad	Ltext_Purple_e - Ltext_Purple - 1
+Lcfstr_kpScaleX:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpScaleX
+	.quad	Ltext_kpScaleX_e - Ltext_kpScaleX - 1
+Lcfstr_kpScaleY:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpScaleY
+	.quad	Ltext_kpScaleY_e - Ltext_kpScaleY - 1
+Lcfstr_kpOpacity:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpOpacity
+	.quad	Ltext_kpOpacity_e - Ltext_kpOpacity - 1
+Lcfstr_kpPositionX:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpPositionX
+	.quad	Ltext_kpPositionX_e - Ltext_kpPositionX - 1
+Lcfstr_kpPositionY:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpPositionY
+	.quad	Ltext_kpPositionY_e - Ltext_kpPositionY - 1
+Lcfstr_kpColors:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpColors
+	.quad	Ltext_kpColors_e - Ltext_kpColors - 1
 
 // The menu table: one 16-byte entry per colour, { title, &selref }.
 // Field 1 is the address of the selector-reference slot rather than a SEL,
@@ -657,6 +1170,51 @@ Lcolors:
 	.quad	Lcfstr_Green,	Lsel_systemGreenColor
 	.quad	Lcfstr_Blue,	Lsel_systemBlueColor
 	.quad	Lcfstr_Purple,	Lsel_systemPurpleColor
+
+// The cloud: one 32-byte entry per blob.
+//   { &selref base colour, &selref fade-to colour, x%, y%, size%, period }
+// Positions and sizes are percentages of the screen, so the layout holds on
+// any device. size% is a fraction of the *width* on both axes - the blobs are
+// circular before the scale animations stretch them.
+	.p2align 3
+Lblobs:
+	.quad	Lsel_systemPinkColor,	Lsel_systemPurpleColor
+	.short	22, 26, 95, 7
+	.space	8
+	.quad	Lsel_systemBlueColor,	Lsel_systemTealColor
+	.short	78, 32, 105, 9
+	.space	8
+	.quad	Lsel_systemPurpleColor,	Lsel_systemIndigoColor
+	.short	50, 52, 120, 11
+	.space	8
+	.quad	Lsel_systemTealColor,	Lsel_systemBlueColor
+	.short	26, 72, 95, 8
+	.space	8
+	.quad	Lsel_systemOrangeColor,	Lsel_systemPinkColor
+	.short	80, 76, 90, 10
+	.space	8
+
+// The animations every blob shares: one 32-byte entry per animation.
+//   { key path, fromValue, toValue, seconds added to the blob's period }
+// Scale x and y run at different rates, so a blob is never quite a circle -
+// that is what reads as the shape slowly changing.
+	.p2align 3
+LanimTable:
+	.quad	Lcfstr_kpScaleX
+	.double	0.85
+	.double	1.20
+	.short	0
+	.space	6
+	.quad	Lcfstr_kpScaleY
+	.double	1.18
+	.double	0.88
+	.short	2
+	.space	6
+	.quad	Lcfstr_kpOpacity
+	.double	0.55
+	.double	0.95
+	.short	1
+	.space	6
 
 // Block descriptor, shared by all six literals:
 //   { reserved, literal size, signature, layout }

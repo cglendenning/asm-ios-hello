@@ -20,6 +20,10 @@
     background: #0071e3; color: #fff; text-decoration: none; font-weight: 600;
   }
   a.install:active { opacity: .8; }
+  img.shot {
+    display: block; width: 210px; max-width: 60%; margin: 0 auto 2.5rem;
+    border-radius: 22px; box-shadow: 0 8px 30px rgba(0,0,0,.28);
+  }
   dl { margin: 2.5rem 0 0; text-align: left; display: grid;
        grid-template-columns: auto 1fr; gap: .4rem 1.5rem; font-size: .9rem; }
   dt { opacity: .6; }
@@ -31,15 +35,17 @@
 <main>
   <h1>Hello ASM</h1>
   <p class="sub">An iOS app written entirely in hand-written ARM64 assembly.
-     Pick a colour from the menu to recolour the text.</p>
+     A drifting gradient cloud, and a menu to recolour the text.</p>
+
+  <img class="shot" src="preview.jpg" alt="The app running: Hello World over a glowing gradient cloud, above a Text Color button.">
 
   <a class="install" href="itms-services://?action=download-manifest&amp;url=https://cglendenning.github.io/asm-ios-hello/manifest.plist">Install</a>
 
   <dl>
-    <dt>Executable</dt><dd>70,416 bytes</dd>
-    <dt>IPA</dt><dd>16,508 bytes</dd>
-    <dt>Machine code</dt><dd>1,288 bytes</dd>
-    <dt>Instructions</dt><dd>322</dd>
+    <dt>Executable</dt><dd>70,896 bytes</dd>
+    <dt>IPA</dt><dd>17,828 bytes</dd>
+    <dt>Machine code</dt><dd>2,740 bytes</dd>
+    <dt>Instructions</dt><dd>685</dd>
     <dt>Minimum iOS</dt><dd>14.0</dd>
   </dl>
 
