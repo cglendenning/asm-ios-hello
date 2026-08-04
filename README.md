@@ -55,7 +55,7 @@ profile, same signing identity, same zip.
 | `__text` (machine code) | **760 B** | 10,708 B | 10,912 B |
 | instructions | **190** | 2,677 | 2,728 |
 | executable, signed | **70,080 B** | 111,920 B | 92,960 B |
-| IPA | **16,091 B** | 28,251 B | 24,610 B |
+| IPA | **16,092 B** | 28,251 B | 24,610 B |
 
 The executable and IPA figures are dominated by fixed overhead rather than by
 code: iOS uses 16 KB pages, so the smallest possible executable is already
