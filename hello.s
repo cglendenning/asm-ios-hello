@@ -13,7 +13,7 @@
 // by UIAction, and UIAction takes a *block* - so the block literals, their
 // descriptor and their invoke functions are all laid out by hand too.
 //
-// Behind it all, five radial CAGradientLayers drift, breathe and cross-fade
+// Behind it all, eight radial CAGradientLayers drift, breathe and cross-fade
 // to make a soft glowing cloud. Core Animation runs those on the render
 // server, so the animation costs no CPU once it has been set up.
 //
@@ -34,7 +34,7 @@
 
 	.set	NCOLORS, 6			// entries in the colour menu
 	.set	BLOCK_SIZE, 32			// bytes per global block literal
-	.set	NBLOBS, 5			// gradient blobs making up the cloud
+	.set	NBLOBS, 8			// gradient blobs making up the cloud
 	.set	NANIMS, 3			// shared per-blob scalar animations
 
 //---------------------------------------------------------------------------
@@ -158,6 +158,16 @@ _main:
 	LEA	x3, Lstr_typeSetWindow
 	bl	_class_addMethod
 
+	// class_addMethod(cls, @selector(cloudDidBecomeActive:),
+	//                 (IMP)AppDelegate_becameActive, "v@:@");
+	LEA	x0, Lstr_selBecameActive
+	bl	_sel_registerName
+	mov	x1, x0
+	mov	x0, x21
+	LEA	x2, LAppDelegate_becameActive
+	LEA	x3, Lstr_typeSetWindow		// same encoding: void (id, SEL, id)
+	bl	_class_addMethod
+
 	// objc_registerClassPair(cls);
 	mov	x0, x21
 	bl	_objc_registerClassPair
@@ -199,6 +209,7 @@ LAppDelegate_didFinishLaunching:
 	stp	x23, x24, [sp, #48]
 	stp	d8,  d9,  [sp, #64]		// screen bounds must survive the calls
 	stp	d10, d11, [sp, #80]
+	STOREG	x0, LgDelegate			// the notification observer
 
 	// CGRect bounds = [[UIScreen mainScreen] bounds];
 	CLASSREF UIScreen
@@ -252,6 +263,22 @@ LAppDelegate_didFinishLaunching:
 	fmov	d0, d10
 	fmov	d1, d11
 	bl	LbuildCloud
+
+	// [[NSNotificationCenter defaultCenter]
+	//        addObserver:self
+	//           selector:@selector(cloudDidBecomeActive:)
+	//               name:UIApplicationDidBecomeActiveNotification
+	//             object:nil];
+	CLASSREF NSNotificationCenter
+	MSGSEND	defaultCenter
+	mov	x24, x0
+	LOADG	x2, LgDelegate
+	adrp	x8, Lsel_cloudDidBecomeActive@PAGE
+	ldr	x3, [x8, Lsel_cloudDidBecomeActive@PAGEOFF]
+	GOTREF	x4, _UIApplicationDidBecomeActiveNotification
+	mov	x5, #0
+	mov	x0, x24
+	MSGSEND	addObserverSelectorNameObject
 
 	//-------------------------------------------------------------------
 	// The label
@@ -521,53 +548,55 @@ LapplyColor:
 
 
 //===========================================================================
-// LbuildCloud - lay five glowing radial blobs into a view's layer.
+// LbuildCloud - lay the glowing blobs into a view's layer.
 //
 //   x0 = UIView *root, d0 = width, d1 = height
 //
-// Each blob is a CAGradientLayer in radial mode whose colours run from a
-// system colour at 0.875 alpha in the centre to the same colour at zero alpha
-// at the rim, which is what gives the soft edge - no blur pass, no offscreen
-// render. Five independent animations per blob, all with different periods so
-// they never re-sync, make it breathe, drift and cross-fade.
-//
-// Stack frame (160 bytes):
-//   [  0] x29, x30       [ 16] x19 root layer, x20 blob entry
-//   [ 32] x21 blob index, x22 gradient layer  [ 48] x23, x24 scratch
-//   [ 64] x25, x26 boxed values               [ 80] x27 anim index, x28 entry
-//   [ 96] d8 width, d9 height                 [112] d10 duration, d11 centre x
-//   [128] d12 centre y, d13                   [144] fromColours, toColours
+// Each blob is a CAGradientLayer in radial mode. Rather than a single hot
+// point fading straight to nothing, the colours run over three stops - full
+// strength, three-quarters, then transparent - placed at 0, 0.45 and 1. That
+// broad middle plateau is what removes the "lit from a pin-prick" look and
+// lets neighbouring blobs read as overlapping sheets of colour instead of
+// discrete circles. The frames are ellipses, not squares, and several are
+// wider than the screen, so no blob shows an edge.
 //===========================================================================
 	.p2align 2
 LbuildCloud:
-	stp	x29, x30, [sp, #-160]!
+	stp	x29, x30, [sp, #-112]!
 	mov	x29, sp
 	stp	x19, x20, [sp, #16]
 	stp	x21, x22, [sp, #32]
 	stp	x23, x24, [sp, #48]
-	stp	x25, x26, [sp, #64]
-	stp	x27, x28, [sp, #80]
-	stp	d8,  d9,  [sp, #96]
-	stp	d10, d11, [sp, #112]
-	stp	d12, d13, [sp, #128]
+	stp	d8,  d9,  [sp, #64]
+	str	d10,      [sp, #80]
 	fmov	d8, d0				// width
 	fmov	d9, d1				// height
 
 	MSGSEND	layer				// x0 is already the root view
 	mov	x19, x0				// root.layer
 
+	// The stop positions are the same for every blob, so build the array
+	// once: @[ @0.0, @0.45, @1.0 ].
+	fmov	d0, xzr
+	bl	LnumD
+	str	x0, [sp, #88]
+	adrp	x8, Ldbl_mid@PAGE
+	ldr	d0, [x8, Ldbl_mid@PAGEOFF]
+	bl	LnumD
+	str	x0, [sp, #96]
+	fmov	d0, #1.0
+	bl	LnumD
+	str	x0, [sp, #104]
+	add	x2, sp, #88
+	mov	x3, #3
+	CLASSREF NSArray
+	MSGSEND	arrayWithObjectsCount
+	STOREG	x0, LgLocations
+
 	mov	x21, #0				// blob index
 Lblob_loop:
 	LEA	x20, Lblobs
 	add	x20, x20, x21, lsl #5		// &Lblobs[i]   (32 bytes per entry)
-
-	// The colour array the blob starts on, and the one it fades toward.
-	mov	x0, x20
-	bl	LmakeColors
-	str	x0, [sp, #144]
-	add	x0, x20, #8
-	bl	LmakeColors
-	str	x0, [sp, #152]
 
 	// CAGradientLayer *g = [CAGradientLayer layer];
 	CLASSREF CAGradientLayer
@@ -579,13 +608,18 @@ Lblob_loop:
 	mov	x0, x22
 	MSGSEND	setType
 
-	// [g setColors:fromColours];
-	ldr	x2, [sp, #144]
+	// [g setColors:<three stops of the base colour>];
+	mov	x0, x20
+	bl	LmakeStops
+	mov	x2, x0
 	mov	x0, x22
 	MSGSEND	setColors
 
-	// Centre the gradient and let it reach the corner: startPoint (0.5,0.5),
-	// endPoint (1,1). CGPoint is a 2-double HFA, so it travels in d0/d1.
+	// [g setLocations:@[ @0.0, @0.45, @1.0 ]];
+	LOADG	x2, LgLocations
+	mov	x0, x22
+	MSGSEND	setLocations
+
 	mov	x0, x22
 	fmov	d0, #0.5
 	fmov	d1, #0.5
@@ -595,30 +629,35 @@ Lblob_loop:
 	fmov	d1, #1.0
 	MSGSEND	setEndPoint
 
-	// The table stores position and size as percentages, so the cloud
-	// lays itself out correctly on any screen.
-	//   size = width * size%  / 100
-	//   cx   = width * x%     / 100 ,  cy = height * y% / 100
-	ldrsh	w9,  [x20, #16]			// x%
-	ldrsh	w10, [x20, #18]			// y%
-	ldrsh	w11, [x20, #20]			// size%
-	mov	w12, #100
-	scvtf	d5, w12
+	// Width and height are independent percentages, so the blobs are
+	// ellipses of differing proportion rather than a row of circles.
+	//   w = width * w% / 100 ,  h = width * h% / 100
+	//   cx = width * x% / 100 , cy = height * y% / 100
+	ldrsh	w9,  [x20, #8]			// x%
+	ldrsh	w10, [x20, #10]			// y%
+	ldrsh	w11, [x20, #12]			// w%
+	ldrsh	w12, [x20, #14]			// h%
+	mov	w13, #100
+	scvtf	d5, w13
 	scvtf	d4, w11
 	fmul	d4, d8, d4
-	fdiv	d4, d4, d5			// size
-	scvtf	d6, w9
+	fdiv	d4, d4, d5			// blob width
+	scvtf	d6, w12
 	fmul	d6, d8, d6
-	fdiv	d11, d6, d5			// centre x
-	scvtf	d7, w10
-	fmul	d7, d9, d7
-	fdiv	d12, d7, d5			// centre y
-	fmov	d16, #2.0
-	fdiv	d16, d4, d16
-	fsub	d0, d11, d16			// frame.origin.x
-	fsub	d1, d12, d16			// frame.origin.y
+	fdiv	d6, d6, d5			// blob height
+	scvtf	d7, w9
+	fmul	d7, d8, d7
+	fdiv	d7, d7, d5			// centre x
+	scvtf	d16, w10
+	fmul	d16, d9, d16
+	fdiv	d16, d16, d5			// centre y
+	fmov	d17, #2.0
+	fdiv	d18, d4, d17
+	fdiv	d19, d6, d17
+	fsub	d0, d7, d18			// frame.origin.x
+	fsub	d1, d16, d19			// frame.origin.y
 	fmov	d2, d4				// frame.size.width
-	fmov	d3, d4				// frame.size.height
+	fmov	d3, d6				// frame.size.height
 	mov	x0, x22
 	MSGSEND	setFrame
 
@@ -627,136 +666,302 @@ Lblob_loop:
 	mov	x2, x22
 	MSGSEND	addSublayer
 
-	ldrsh	w8, [x20, #22]
-	scvtf	d10, w8				// this blob's base period, seconds
+	// Keep the layer so the animations can be re-armed later. The
+	// superlayer owns it, so a bare pointer is enough.
+	LEA	x8, LgBlobLayers
+	str	x22, [x8, x21, lsl #3]
 
-	// The three animations whose endpoints are the same for every blob:
-	// scale.x, scale.y and opacity. Only the period differs, which is what
-	// stops the five blobs from pulsing in lockstep.
-	mov	x27, #0
-Lanim_loop:
-	LEA	x28, LanimTable
-	add	x28, x28, x27, lsl #5
-	ldr	d0, [x28, #8]
-	bl	LnumD
-	mov	x25, x0				// fromValue
-	ldr	d0, [x28, #16]
-	bl	LnumD
-	mov	x26, x0				// toValue
-	ldrsh	w8, [x28, #24]
-	scvtf	d0, w8
-	fadd	d0, d0, d10
-	ldr	x1, [x28]
-	mov	x2, x25
-	mov	x3, x26
 	mov	x0, x22
-	bl	LaddAnim
-	add	x27, x27, #1
-	cmp	x27, #NANIMS
-	b.lt	Lanim_loop
-
-	// Drift. position.x / position.y are animated rather than
-	// transform.translation so they never contend with the scale
-	// animations for the layer's transform.
-	mov	w8, #22
-	scvtf	d13, w8
-	fsub	d0, d11, d13
-	bl	LnumD
-	mov	x25, x0
-	fadd	d0, d11, d13
-	bl	LnumD
-	mov	x26, x0
-	mov	w8, #3
-	scvtf	d0, w8
-	fadd	d0, d0, d10
-	LEA	x1, Lcfstr_kpPositionX
-	mov	x2, x25
-	mov	x3, x26
-	mov	x0, x22
-	bl	LaddAnim
-
-	mov	w8, #18
-	scvtf	d13, w8
-	fadd	d0, d12, d13
-	bl	LnumD
-	mov	x25, x0
-	fsub	d0, d12, d13
-	bl	LnumD
-	mov	x26, x0
-	mov	w8, #5
-	scvtf	d0, w8
-	fadd	d0, d0, d10
-	LEA	x1, Lcfstr_kpPositionY
-	mov	x2, x25
-	mov	x3, x26
-	mov	x0, x22
-	bl	LaddAnim
-
-	// The colour cross-fade, at half the rate of everything else.
-	LEA	x1, Lcfstr_kpColors
-	ldr	x2, [sp, #144]
-	ldr	x3, [sp, #152]
-	fmov	d0, #2.0
-	fmul	d0, d10, d0
-	mov	x0, x22
-	bl	LaddAnim
+	mov	x1, x20
+	bl	LanimateBlob
 
 	add	x21, x21, #1
 	cmp	x21, #NBLOBS
 	b.lt	Lblob_loop
 
-	ldp	d12, d13, [sp, #128]
-	ldp	d10, d11, [sp, #112]
-	ldp	d8,  d9,  [sp, #96]
-	ldp	x27, x28, [sp, #80]
-	ldp	x25, x26, [sp, #64]
+	ldr	d10,      [sp, #80]
+	ldp	d8,  d9,  [sp, #64]
 	ldp	x23, x24, [sp, #48]
 	ldp	x21, x22, [sp, #32]
 	ldp	x19, x20, [sp, #16]
-	ldp	x29, x30, [sp], #160
+	ldp	x29, x30, [sp], #112
 	ret
 
 
 //===========================================================================
-// LmakeColors - two-stop colour array for one blob.
+// LanimateBlob - arm (or re-arm) every animation on one blob.
 //
-//   x0 = address of a __objc_selrefs slot naming a UIColor class method
-//   -> x0 = NSArray *{ CGColor at 0.875 alpha, same CGColor at 0 alpha }
+//   x0 = CAGradientLayer *, x1 = &Lblobs[i]
+//
+// Deliberately stateless: it re-reads the screen bounds and recomputes the
+// blob's centre, so it can be called again at any time. Adding an animation
+// under a key that is already in use replaces it, which makes this idempotent.
+//===========================================================================
+	.p2align 2
+LanimateBlob:
+	stp	x29, x30, [sp, #-112]!
+	mov	x29, sp
+	stp	x19, x20, [sp, #16]
+	stp	x21, x22, [sp, #32]
+	stp	x23, x24, [sp, #48]
+	stp	d8,  d9,  [sp, #64]
+	stp	d10, d11, [sp, #80]
+	stp	d12, d13, [sp, #96]
+	mov	x19, x0				// layer
+	mov	x20, x1				// entry
+
+	CLASSREF UIScreen
+	MSGSEND	mainScreen
+	MSGSEND	bounds
+	fmov	d8, d2				// width
+	fmov	d9, d3				// height
+
+	ldrsh	w9,  [x20, #8]
+	ldrsh	w10, [x20, #10]
+	mov	w13, #100
+	scvtf	d5, w13
+	scvtf	d6, w9
+	fmul	d6, d8, d6
+	fdiv	d12, d6, d5			// centre x
+	scvtf	d7, w10
+	fmul	d7, d9, d7
+	fdiv	d13, d7, d5			// centre y
+
+	ldrsh	w8, [x20, #16]
+	scvtf	d10, w8				// this blob's base period, seconds
+
+	// The three whose endpoints are the same for every blob: scale x,
+	// scale y and opacity. Only the period differs, which is what stops
+	// the blobs pulsing in lockstep.
+	mov	x21, #0
+Lanim_loop:
+	LEA	x22, LanimTable
+	add	x22, x22, x21, lsl #5
+	ldr	d0, [x22, #8]
+	bl	LnumD
+	mov	x23, x0
+	ldr	d0, [x22, #16]
+	bl	LnumD
+	mov	x24, x0
+	ldrsh	w8, [x22, #24]
+	scvtf	d0, w8
+	fadd	d0, d0, d10
+	ldr	x1, [x22]
+	mov	x2, x23
+	mov	x3, x24
+	mov	x0, x19
+	bl	LaddAnim
+	add	x21, x21, #1
+	cmp	x21, #NANIMS
+	b.lt	Lanim_loop
+
+	// Drift. position.x / position.y rather than transform.translation, so
+	// they never contend with the scale animations for the transform.
+	mov	w8, #44
+	scvtf	d11, w8
+	fsub	d0, d12, d11
+	bl	LnumD
+	mov	x23, x0
+	fadd	d0, d12, d11
+	bl	LnumD
+	mov	x24, x0
+	mov	w8, #6
+	scvtf	d0, w8
+	fadd	d0, d0, d10
+	LEA	x1, Lcfstr_kpPositionX
+	mov	x2, x23
+	mov	x3, x24
+	mov	x0, x19
+	bl	LaddAnim
+
+	mov	w8, #36
+	scvtf	d11, w8
+	fadd	d0, d13, d11
+	bl	LnumD
+	mov	x23, x0
+	fsub	d0, d13, d11
+	bl	LnumD
+	mov	x24, x0
+	mov	w8, #9
+	scvtf	d0, w8
+	fadd	d0, d0, d10
+	LEA	x1, Lcfstr_kpPositionY
+	mov	x2, x23
+	mov	x3, x24
+	mov	x0, x19
+	bl	LaddAnim
+
+	// Slide the gradient's own centre around inside the blob. This is what
+	// makes the colour look like it is flowing through the shape rather
+	// than radiating from a fixed pin-prick.
+	fmov	d0, #0.375
+	fmov	d1, #0.40625
+	bl	LvalPoint
+	mov	x23, x0
+	fmov	d0, #0.625
+	fmov	d1, #0.59375
+	bl	LvalPoint
+	mov	x24, x0
+	mov	w8, #4
+	scvtf	d0, w8
+	fadd	d0, d0, d10
+	LEA	x1, Lcfstr_kpStartPoint
+	mov	x2, x23
+	mov	x3, x24
+	mov	x0, x19
+	bl	LaddAnim
+
+	// The colour cross-fade, at half the rate of everything else.
+	mov	x0, x20
+	bl	LmakeStops
+	mov	x23, x0
+	add	x0, x20, #4
+	bl	LmakeStops
+	mov	x24, x0
+	fmov	d0, #2.0
+	fmul	d0, d10, d0
+	LEA	x1, Lcfstr_kpColors
+	mov	x2, x23
+	mov	x3, x24
+	mov	x0, x19
+	bl	LaddAnim
+
+	ldp	d12, d13, [sp, #96]
+	ldp	d10, d11, [sp, #80]
+	ldp	d8,  d9,  [sp, #64]
+	ldp	x23, x24, [sp, #48]
+	ldp	x21, x22, [sp, #32]
+	ldp	x19, x20, [sp, #16]
+	ldp	x29, x30, [sp], #112
+	ret
+
+
+//===========================================================================
+// void -[AppDelegate cloudDidBecomeActive:]   (x0 = self, x1 = _cmd, x2 = note)
+//
+// iOS strips every CAAnimation off a layer when the app is backgrounded and
+// does not put them back, so an app that only animates once at launch appears
+// frozen the next time you return to it. Re-arming on didBecomeActive is the
+// fix, and it is why the cloud kept moving in the simulator but not on a
+// phone that had been switched away from.
+//===========================================================================
+	.p2align 2
+LAppDelegate_becameActive:
+	stp	x29, x30, [sp, #-32]!
+	mov	x29, sp
+	str	x19, [sp, #16]
+	mov	x19, #0
+Lrearm_loop:
+	LEA	x8, LgBlobLayers
+	ldr	x0, [x8, x19, lsl #3]
+	cbz	x0, Lrearm_next			// nothing built yet
+	LEA	x1, Lblobs
+	add	x1, x1, x19, lsl #5
+	bl	LanimateBlob
+Lrearm_next:
+	add	x19, x19, #1
+	cmp	x19, #NBLOBS
+	b.lt	Lrearm_loop
+	ldr	x19, [sp, #16]
+	ldp	x29, x30, [sp], #32
+	ret
+
+
+//===========================================================================
+// LmakeStops - the three-stop colour ramp for one blob.
+//
+//   x0 = address of a { red, green, blue, peak alpha } byte quad
+//   -> x0 = NSArray *{ CGColor@peak, CGColor@0.75*peak, CGColor@0 }
 //
 // NSArray happily holds CGColorRefs: they are CF objects, so the retain the
 // array sends them lands on CFRetain.
 //===========================================================================
 	.p2align 2
-LmakeColors:
-	stp	x29, x30, [sp, #-48]!
+LmakeStops:
+	stp	x29, x30, [sp, #-64]!
 	mov	x29, sp
 	stp	x19, x20, [sp, #16]
+	str	d8,  [sp, #32]
+	mov	x19, x0
 
-	ldr	x1, [x0]			// table entry -> selref slot
-	ldr	x1, [x1]			// slot -> the live SEL
-	CLASSREF UIColor
-	bl	_objc_msgSend
-	mov	x19, x0				// the base UIColor
+	ldrb	w8, [x19, #3]
+	scvtf	d8, w8
+	adrp	x9, Ldbl_255@PAGE
+	ldr	d0, [x9, Ldbl_255@PAGEOFF]
+	fdiv	d8, d8, d0			// peak alpha, 0..1
 
 	mov	x0, x19
-	fmov	d0, #0.875
-	MSGSEND	colorWithAlphaComponent
-	MSGSEND	CGColor
-	str	x0, [sp, #32]
+	fmov	d0, d8
+	bl	LmakeCGColor
+	str	x0, [sp, #40]
+
+	mov	x0, x19
+	fmov	d1, #0.75
+	fmul	d0, d8, d1
+	bl	LmakeCGColor
+	str	x0, [sp, #48]
 
 	mov	x0, x19
 	fmov	d0, xzr				// fmov cannot encode 0.0 as an
-	MSGSEND	colorWithAlphaComponent		// immediate, so move it from xzr
-	MSGSEND	CGColor
-	str	x0, [sp, #40]
+	bl	LmakeCGColor			// immediate, so move it from xzr
+	str	x0, [sp, #56]
 
-	add	x2, sp, #32
-	mov	x3, #2
+	add	x2, sp, #40
+	mov	x3, #3
 	CLASSREF NSArray
 	MSGSEND	arrayWithObjectsCount
 
+	ldr	d8,  [sp, #32]
 	ldp	x19, x20, [sp, #16]
-	ldp	x29, x30, [sp], #48
+	ldp	x29, x30, [sp], #64
+	ret
+
+
+//===========================================================================
+// LmakeCGColor - one CGColor from a byte triple and an alpha.
+//
+//   x0 = address of { red, green, blue, .. } bytes, d0 = alpha
+//
+// Colours come from a table of 8-bit components rather than UIColor class
+// methods, which keeps the palette open-ended and free of any deployment
+// target question about which system colours exist.
+//===========================================================================
+	.p2align 2
+LmakeCGColor:
+	stp	x29, x30, [sp, #-32]!
+	mov	x29, sp
+	str	d8, [sp, #16]
+	fmov	d8, d0				// alpha
+	ldrb	w9,  [x0]
+	ldrb	w10, [x0, #1]
+	ldrb	w11, [x0, #2]
+	adrp	x8, Ldbl_255@PAGE
+	ldr	d4, [x8, Ldbl_255@PAGEOFF]
+	scvtf	d0, w9
+	fdiv	d0, d0, d4
+	scvtf	d1, w10
+	fdiv	d1, d1, d4
+	scvtf	d2, w11
+	fdiv	d2, d2, d4
+	fmov	d3, d8
+	CLASSREF UIColor
+	MSGSEND	colorWithRedGreenBlueAlpha
+	MSGSEND	CGColor
+	ldr	d8, [sp, #16]
+	ldp	x29, x30, [sp], #32
+	ret
+
+
+//===========================================================================
+// LvalPoint - box a CGPoint.   d0 = x, d1 = y  ->  x0 = NSValue *
+//===========================================================================
+	.p2align 2
+LvalPoint:
+	stp	x29, x30, [sp, #-16]!
+	mov	x29, sp
+	CLASSREF NSValue
+	MSGSEND	valueWithCGPoint
+	ldp	x29, x30, [sp], #16
 	ret
 
 
@@ -885,6 +1090,8 @@ Lcls_NSNumber:			.quad _OBJC_CLASS_$_NSNumber
 Lcls_CAGradientLayer:		.quad _OBJC_CLASS_$_CAGradientLayer
 Lcls_CABasicAnimation:		.quad _OBJC_CLASS_$_CABasicAnimation
 Lcls_CAMediaTimingFunction:	.quad _OBJC_CLASS_$_CAMediaTimingFunction
+Lcls_NSValue:			.quad _OBJC_CLASS_$_NSValue
+Lcls_NSNotificationCenter:	.quad _OBJC_CLASS_$_NSNotificationCenter
 
 // Selector name strings.
 	.section __TEXT,__objc_methname,cstring_literals
@@ -950,6 +1157,12 @@ Lmn_setMasksToBounds:	.asciz "setMasksToBounds:"
 Lmn_setShadowColor:	.asciz "setShadowColor:"
 Lmn_setShadowOpacity:	.asciz "setShadowOpacity:"
 Lmn_setShadowRadius:	.asciz "setShadowRadius:"
+Lmn_colorWithRedGreenBlueAlpha:	.asciz "colorWithRed:green:blue:alpha:"
+Lmn_setLocations:	.asciz "setLocations:"
+Lmn_valueWithCGPoint:	.asciz "valueWithCGPoint:"
+Lmn_defaultCenter:	.asciz "defaultCenter"
+Lmn_addObserverSelectorNameObject:	.asciz "addObserver:selector:name:object:"
+Lmn_cloudDidBecomeActive:	.asciz "cloudDidBecomeActive:"
 
 // Selector references. The runtime rewrites each slot in place, name -> SEL.
 	.section __DATA,__objc_selrefs,literal_pointers,no_dead_strip
@@ -1016,6 +1229,12 @@ Lsel_setMasksToBounds:	.quad Lmn_setMasksToBounds
 Lsel_setShadowColor:	.quad Lmn_setShadowColor
 Lsel_setShadowOpacity:	.quad Lmn_setShadowOpacity
 Lsel_setShadowRadius:	.quad Lmn_setShadowRadius
+Lsel_colorWithRedGreenBlueAlpha:	.quad Lmn_colorWithRedGreenBlueAlpha
+Lsel_setLocations:	.quad Lmn_setLocations
+Lsel_valueWithCGPoint:	.quad Lmn_valueWithCGPoint
+Lsel_defaultCenter:	.quad Lmn_defaultCenter
+Lsel_addObserverSelectorNameObject:	.quad Lmn_addObserverSelectorNameObject
+Lsel_cloudDidBecomeActive:	.quad Lmn_cloudDidBecomeActive
 
 // Plain C strings: runtime-registered selectors, method type encodings, the
 // runtime class name, the block signature, and the UTF-8 backing for the
@@ -1026,6 +1245,7 @@ Lstr_AppDelegate:	.asciz "AppDelegate"
 Lstr_selDidFinish:	.asciz "application:didFinishLaunchingWithOptions:"
 Lstr_selWindow:		.asciz "window"
 Lstr_selSetWindow:	.asciz "setWindow:"
+Lstr_selBecameActive:	.asciz "cloudDidBecomeActive:"
 Lstr_typeDidFinish:	.asciz "B@:@@"		// BOOL (id, SEL, id, id)
 Lstr_typeWindow:	.asciz "@@:"		// id   (id, SEL)
 Lstr_typeSetWindow:	.asciz "v@:@"		// void (id, SEL, id)
@@ -1061,6 +1281,8 @@ Ltext_kpPositionY:	.asciz "position.y"
 Ltext_kpPositionY_e:
 Ltext_kpColors:	.asciz "colors"
 Ltext_kpColors_e:
+Ltext_kpStartPoint:	.asciz "startPoint"
+Ltext_kpStartPoint_e:
 
 // Constant NSStrings, laid out by hand in CoreFoundation's documented shape:
 //   { isa, flags, cstring pointer, length }.  0x7c8 marks an 8-bit,
@@ -1157,6 +1379,12 @@ Lcfstr_kpColors:
 	.space	4
 	.quad	Ltext_kpColors
 	.quad	Ltext_kpColors_e - Ltext_kpColors - 1
+Lcfstr_kpStartPoint:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpStartPoint
+	.quad	Ltext_kpStartPoint_e - Ltext_kpStartPoint - 1
 
 // The menu table: one 16-byte entry per colour, { title, &selref }.
 // Field 1 is the address of the selector-reference slot rather than a SEL,
@@ -1172,47 +1400,87 @@ Lcolors:
 	.quad	Lcfstr_Purple,	Lsel_systemPurpleColor
 
 // The cloud: one 32-byte entry per blob.
-//   { &selref base colour, &selref fade-to colour, x%, y%, size%, period }
-// Positions and sizes are percentages of the screen, so the layout holds on
-// any device. size% is a fraction of the *width* on both axes - the blobs are
-// circular before the scale animations stretch them.
+//   { r,g,b,peak alpha }  { r,g,b,peak alpha of the colour it fades toward }
+//   x%, y%, width%, height%, period
+// Positions and sizes are percentages, so the layout holds on any screen.
+// Width and height are both fractions of the screen *width*, which keeps the
+// blobs elliptical instead of stretching with the aspect ratio. Several are
+// wider than 100%, so their edges fall outside the screen and the cloud reads
+// as continuous rather than as a group of circles.
+//
+// Components are 8-bit, which means the palette is not limited to the system
+// colours - the first two rows are systemIndigo/systemPurple and
+// systemTeal/systemBlue exactly, and the rest reach past them into cyan,
+// mint, magenta, amber and coral.
 	.p2align 3
 Lblobs:
-	.quad	Lsel_systemPinkColor,	Lsel_systemPurpleColor
-	.short	22, 26, 95, 7
-	.space	8
-	.quad	Lsel_systemBlueColor,	Lsel_systemTealColor
-	.short	78, 32, 105, 9
-	.space	8
-	.quad	Lsel_systemPurpleColor,	Lsel_systemIndigoColor
-	.short	50, 52, 120, 11
-	.space	8
-	.quad	Lsel_systemTealColor,	Lsel_systemBlueColor
-	.short	26, 72, 95, 8
-	.space	8
-	.quad	Lsel_systemOrangeColor,	Lsel_systemPinkColor
-	.short	80, 76, 90, 10
-	.space	8
+	.byte	88, 86, 214, 110		// systemIndigo
+	.byte	175, 82, 222, 110		// systemPurple
+	.short	48, 24, 200, 155
+	.short	17, 0
+	.space	12
+
+	.byte	48, 176, 199, 105		// systemTeal
+	.byte	0, 122, 255, 105		// systemBlue
+	.short	52, 78, 195, 150
+	.short	21, 0
+	.space	12
+
+	.byte	255, 45, 85, 140		// systemPink
+	.byte	214, 44, 164, 140		// magenta
+	.short	22, 20, 112, 96
+	.short	13, 0
+	.space	12
+
+	.byte	0, 122, 255, 135		// systemBlue
+	.byte	50, 173, 230, 135		// cyan
+	.short	80, 32, 120, 102
+	.short	15, 0
+	.space	12
+
+	.byte	175, 82, 222, 125		// systemPurple
+	.byte	88, 86, 214, 125		// systemIndigo
+	.short	44, 52, 132, 118
+	.short	19, 0
+	.space	12
+
+	.byte	0, 199, 190, 130		// mint
+	.byte	48, 176, 199, 130		// systemTeal
+	.short	18, 66, 108, 94
+	.short	14, 0
+	.space	12
+
+	.byte	255, 149, 0, 132		// systemOrange
+	.byte	255, 45, 85, 132		// systemPink
+	.short	84, 74, 104, 90
+	.short	16, 0
+	.space	12
+
+	.byte	255, 204, 0, 120		// amber
+	.byte	255, 111, 74, 120		// coral
+	.short	64, 56, 90, 80
+	.short	12, 0
+	.space	12
 
 // The animations every blob shares: one 32-byte entry per animation.
 //   { key path, fromValue, toValue, seconds added to the blob's period }
-// Scale x and y run at different rates, so a blob is never quite a circle -
-// that is what reads as the shape slowly changing.
+// Scale x and y run at different rates, so a blob is never quite the same
+// ellipse twice - that is what reads as the shape slowly changing.
 	.p2align 3
 LanimTable:
 	.quad	Lcfstr_kpScaleX
-	.double	0.85
-	.double	1.20
+	.double	0.72
+	.double	1.38
 	.short	0
 	.space	6
 	.quad	Lcfstr_kpScaleY
-	.double	1.18
-	.double	0.88
-	.short	2
+	.double	1.34
+	.double	0.78
+	.short	3
 	.space	6
 	.quad	Lcfstr_kpOpacity
-	.double	0.55
-	.double	0.95
+	.double	0.45
+	.double	1.00
 	.short	1
 	.space	6
 
@@ -1240,12 +1508,17 @@ Lblocks:
 	.section __TEXT,__literal8,8byte_literals
 	.p2align 3
 Ldbl_fontSize:	.double 44.0
+Ldbl_255:	.double 255.0
+Ldbl_mid:	.double 0.45
 
 	.section __DATA,__data
 	.p2align 3
 LgWindow:	.quad 0
 LgLabel:	.quad 0
 LgButton:	.quad 0
+LgDelegate:	.quad 0
+LgLocations:	.quad 0
+LgBlobLayers:	.space 8 * NBLOBS
 
 // Tells the Objective-C runtime this image contains ObjC metadata to fix up.
 	.section __DATA,__objc_imageinfo,regular,no_dead_strip

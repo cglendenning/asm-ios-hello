@@ -35,14 +35,31 @@ structure is written out by hand:
 - **`CGRect` is passed in registers.** It is a four-double homogeneous
   aggregate, so screen bounds travel in `d0`–`d3` and are parked in the
   callee-saved `d8`–`d11` across calls.
-- **The cloud is five radial `CAGradientLayer`s.** Each runs from a system
-  colour at 0.875 alpha in the centre to the same colour at zero alpha at the
-  rim, which is what produces the soft edge — no blur pass and no offscreen
-  render. Five animations per blob (scale x, scale y, opacity, position x,
-  position y, plus a colour cross-fade) all have different periods, so the
-  blobs never re-sync and the shape never repeats. `position` is animated
-  rather than `transform.translation` so it cannot contend with the scale
-  animations for the layer's transform.
+- **The cloud is eight radial `CAGradientLayer`s.** Each ramps over three
+  stops — full strength, three-quarters, transparent — at locations 0, 0.45
+  and 1. That broad middle plateau is what stops a blob looking lit from a
+  pin-prick and lets neighbours read as overlapping sheets rather than
+  discrete circles. No blur pass and no offscreen render. The frames are
+  ellipses and several are wider than the screen, so no blob shows an edge.
+- **Colours are 8-bit component triples**, not `UIColor` class methods, which
+  keeps the palette open-ended and sidesteps any deployment-target question
+  about which system colours exist. `systemIndigo`, `systemPurple`,
+  `systemTeal` and `systemBlue` appear at their exact values, alongside cyan,
+  mint, magenta, amber and coral.
+- **Seven animations per blob** — scale x, scale y, opacity, position x,
+  position y, `startPoint`, and a colour cross-fade — every one on a different
+  period, so the blobs never re-sync and the composition never repeats.
+  `position` is animated rather than `transform.translation` so it cannot
+  contend with the scale animations for the layer's transform. Animating
+  `startPoint` slides the gradient's own centre around inside the blob, which
+  is what makes the colour look like it is flowing through the shape.
+- **The animations are re-armed on `didBecomeActive`.** iOS strips every
+  `CAAnimation` off a layer when an app is backgrounded and does not put them
+  back, so an app that only animates at launch looks frozen the next time you
+  return to it. `LanimateBlob` is deliberately stateless — it re-reads the
+  screen bounds and recomputes the blob's centre — so it can be called again
+  at any time, and adding an animation under a key already in use replaces it,
+  which makes re-arming idempotent.
 - **The menu's blocks are hand-built.** `UIMenu` is driven by `UIAction`, and
   `UIAction` takes a block — so the six block literals, their shared
   descriptor and their invoke functions are laid out by hand to the block ABI:
