@@ -52,7 +52,14 @@ structure is written out by hand:
   `position` is animated rather than `transform.translation` so it cannot
   contend with the scale animations for the layer's transform. Animating
   `startPoint` slides the gradient's own centre around inside the blob, which
-  is what makes the colour look like it is flowing through the shape.
+  is what makes the colour look like it is flowing through the shape —
+  animated together with `endPoint`, over the same period and timing curve, so
+  their difference stays pinned at 0.40625. A radial `CAGradientLayer`'s
+  extent *is* `endPoint - startPoint`; moving `startPoint` alone swells that
+  radius past 0.5, the ramp is still part-way up when it meets the layer's
+  rectangular bounds, and the blob flashes a hard-edged rectangle. Holding the
+  radius constant and leaving margin inside the layer keeps the fade complete
+  in every direction.
 - **The animations are re-armed on `didBecomeActive`.** iOS strips every
   `CAAnimation` off a layer when an app is backgrounded and does not put them
   back, so an app that only animates at launch looks frozen the next time you

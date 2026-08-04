@@ -65,8 +65,8 @@ cat > "$APP/Info.plist" <<EOF
 	<key>CFBundleExecutable</key><string>$APP_NAME</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-	<key>CFBundleVersion</key><string>4</string>
-	<key>CFBundleShortVersionString</key><string>1.3</string>
+	<key>CFBundleVersion</key><string>5</string>
+	<key>CFBundleShortVersionString</key><string>1.4</string>
 	<key>CFBundleSupportedPlatforms</key><array><string>$PLIST_PLATFORM</string></array>
 	<key>MinimumOSVersion</key><string>$MIN_IOS</string>
 	<key>UIDeviceFamily</key><array><integer>1</integer></array>

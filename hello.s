@@ -620,13 +620,17 @@ Lblob_loop:
 	mov	x0, x22
 	MSGSEND	setLocations
 
+	// The gradient's extent is endPoint - startPoint. Keeping that radius
+	// at 0.40625 rather than 0.5 leaves margin inside the layer, so the
+	// ramp always reaches zero alpha before the rectangular bounds clip
+	// it - otherwise the blob shows a hard edge.
 	mov	x0, x22
 	fmov	d0, #0.5
 	fmov	d1, #0.5
 	MSGSEND	setStartPoint
 	mov	x0, x22
-	fmov	d0, #1.0
-	fmov	d1, #1.0
+	fmov	d0, #0.90625
+	fmov	d1, #0.90625
 	MSGSEND	setEndPoint
 
 	// Width and height are independent percentages, so the blobs are
@@ -794,18 +798,44 @@ Lanim_loop:
 	// Slide the gradient's own centre around inside the blob. This is what
 	// makes the colour look like it is flowing through the shape rather
 	// than radiating from a fixed pin-prick.
-	fmov	d0, #0.375
-	fmov	d1, #0.40625
+	//
+	// startPoint and endPoint are animated as a pair, over the same period
+	// and the same timing curve, so their difference - the radius - stays
+	// pinned at 0.40625 throughout. Moving startPoint alone would swell the
+	// radius past 0.5, the ramp would still be part-way up when it reached
+	// the layer's bounds, and the blob would flash a hard rectangle.
+	//
+	// Worst case the ramp spans [0.5625 - 0.40625, 0.5625 + 0.40625]
+	// = [0.15625, 0.96875], comfortably inside the layer.
+	fmov	d0, #0.4375
+	fmov	d1, #0.4375
 	bl	LvalPoint
 	mov	x23, x0
-	fmov	d0, #0.625
-	fmov	d1, #0.59375
+	fmov	d0, #0.5625
+	fmov	d1, #0.5625
 	bl	LvalPoint
 	mov	x24, x0
 	mov	w8, #4
 	scvtf	d0, w8
 	fadd	d0, d0, d10
 	LEA	x1, Lcfstr_kpStartPoint
+	mov	x2, x23
+	mov	x3, x24
+	mov	x0, x19
+	bl	LaddAnim
+
+	fmov	d0, #0.84375
+	fmov	d1, #0.84375
+	bl	LvalPoint
+	mov	x23, x0
+	fmov	d0, #0.96875
+	fmov	d1, #0.96875
+	bl	LvalPoint
+	mov	x24, x0
+	mov	w8, #4				// identical period to startPoint:
+	scvtf	d0, w8				// the two must stay in lockstep
+	fadd	d0, d0, d10
+	LEA	x1, Lcfstr_kpEndPoint
 	mov	x2, x23
 	mov	x3, x24
 	mov	x0, x19
@@ -1283,6 +1313,8 @@ Ltext_kpColors:	.asciz "colors"
 Ltext_kpColors_e:
 Ltext_kpStartPoint:	.asciz "startPoint"
 Ltext_kpStartPoint_e:
+Ltext_kpEndPoint:	.asciz "endPoint"
+Ltext_kpEndPoint_e:
 
 // Constant NSStrings, laid out by hand in CoreFoundation's documented shape:
 //   { isa, flags, cstring pointer, length }.  0x7c8 marks an 8-bit,
@@ -1385,6 +1417,12 @@ Lcfstr_kpStartPoint:
 	.space	4
 	.quad	Ltext_kpStartPoint
 	.quad	Ltext_kpStartPoint_e - Ltext_kpStartPoint - 1
+Lcfstr_kpEndPoint:
+	.quad	___CFConstantStringClassReference
+	.long	0x7c8
+	.space	4
+	.quad	Ltext_kpEndPoint
+	.quad	Ltext_kpEndPoint_e - Ltext_kpEndPoint - 1
 
 // The menu table: one 16-byte entry per colour, { title, &selref }.
 // Field 1 is the address of the selector-reference slot rather than a SEL,
@@ -1416,49 +1454,49 @@ Lcolors:
 Lblobs:
 	.byte	88, 86, 214, 110		// systemIndigo
 	.byte	175, 82, 222, 110		// systemPurple
-	.short	48, 24, 200, 155
+	.short	48, 24, 246, 191
 	.short	17, 0
 	.space	12
 
 	.byte	48, 176, 199, 105		// systemTeal
 	.byte	0, 122, 255, 105		// systemBlue
-	.short	52, 78, 195, 150
+	.short	52, 78, 240, 185
 	.short	21, 0
 	.space	12
 
 	.byte	255, 45, 85, 140		// systemPink
 	.byte	214, 44, 164, 140		// magenta
-	.short	22, 20, 112, 96
+	.short	22, 20, 138, 118
 	.short	13, 0
 	.space	12
 
 	.byte	0, 122, 255, 135		// systemBlue
 	.byte	50, 173, 230, 135		// cyan
-	.short	80, 32, 120, 102
+	.short	80, 32, 148, 126
 	.short	15, 0
 	.space	12
 
 	.byte	175, 82, 222, 125		// systemPurple
 	.byte	88, 86, 214, 125		// systemIndigo
-	.short	44, 52, 132, 118
+	.short	44, 52, 162, 145
 	.short	19, 0
 	.space	12
 
 	.byte	0, 199, 190, 130		// mint
 	.byte	48, 176, 199, 130		// systemTeal
-	.short	18, 66, 108, 94
+	.short	18, 66, 133, 116
 	.short	14, 0
 	.space	12
 
 	.byte	255, 149, 0, 132		// systemOrange
 	.byte	255, 45, 85, 132		// systemPink
-	.short	84, 74, 104, 90
+	.short	84, 74, 128, 111
 	.short	16, 0
 	.space	12
 
 	.byte	255, 204, 0, 120		// amber
 	.byte	255, 111, 74, 120		// coral
-	.short	64, 56, 90, 80
+	.short	64, 56, 111, 98
 	.short	12, 0
 	.space	12
 
